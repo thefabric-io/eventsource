@@ -86,7 +86,7 @@ func On(a Aggregator, event Event) {
 
 		s, err := a.Snapshot()
 		if err != nil {
-
+			log.Printf("error snapshoting aggregate with id `%s`", event.AggregateID())
 		}
 
 		a.StackSnapshot(s)
@@ -126,7 +126,7 @@ func (a *BaseAggregate) Snapshot() (*Snapshot, error) {
 func (a *BaseAggregate) FromSnapshot(snapshot *Snapshot) {
 	if snapshot != nil {
 		if err := json.Unmarshal(snapshot.Data, a.data); err != nil {
-			log.Printf("error in replay from snapshot for organization with id '%s'", snapshot.AggregateID)
+			log.Printf("error in replay from snapshot for aggregate with id '%s'", snapshot.AggregateID)
 		}
 
 		a.SetVersion(snapshot.AggregateVersion)
