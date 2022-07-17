@@ -20,12 +20,20 @@ func ErrIsSnapshotNotFound(err error) bool {
 
 type TxAccessMode string
 
+func (t TxAccessMode) String() string {
+	return string(t)
+}
+
 const (
 	ReadWrite TxAccessMode = "read write"
 	ReadOnly  TxAccessMode = "read only"
 )
 
 type TxIsoLevel string
+
+func (t TxIsoLevel) String() string {
+	return string(t)
+}
 
 const (
 	Serializable    TxIsoLevel = "serializable"
@@ -35,6 +43,10 @@ const (
 )
 
 type TxDeferrableMode string
+
+func (t TxDeferrableMode) String() string {
+	return string(t)
+}
 
 const (
 	Deferrable    TxDeferrableMode = "deferrable"
@@ -69,6 +81,6 @@ func DefaultTransactionOptions() BeginTransactionOptions {
 }
 
 type Transaction interface {
-	Commit(ctx context.Context) error
-	Rollback(ctx context.Context) error
+	Commit() error
+	Rollback() error
 }

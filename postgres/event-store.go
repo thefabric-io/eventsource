@@ -4,60 +4,108 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v4"
+	"github.com/Masterminds/squirrel"
+	"github.com/jmoiron/sqlx"
+	_ "github.com/lib/pq"
 	"github.com/thefabric-io/errors"
 	"github.com/thefabric-io/eventsource"
-	"github.com/thefabric-io/timetracker"
+	"github.com/uptrace/opentelemetry-go-extra/otelsql"
+	"github.com/uptrace/opentelemetry-go-extra/otelsqlx"
+	"go.opentelemetry.io/otel/attribute"
+	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
+	"go.opentelemetry.io/otel/trace"
 )
 
-func NewEventStore(connString, schema string) (eventsource.EventStore, error) {
-	conn, err := pgx.Connect(context.Background(), connString)
+func NewEventStore(connString string, tracer trace.Tracer, options *Options) (eventsource.EventStore, error) {
+	if options == nil || options.IsZero() {
+		options = DefaultOptions()
+	}
+
+	db, err := otelsqlx.Open("postgres", connString, otelsql.WithAttributes(semconv.DBSystemPostgreSQL))
 	if err != nil {
 		return nil, err
 	}
 
+	if err := db.Ping(); err != nil {
+		return nil, err
+	}
+
 	return &eventStore{
-		conn:   conn,
-		schema: schema,
+		db:      db,
+		options: options,
+		tracer:  tracer,
 	}, nil
 }
 
 type eventStore struct {
-	conn              *pgx.Conn
-	snapshotFrequency int
-	schema            string
+	db      *sqlx.DB
+	options *Options
+	tracer  trace.Tracer
 }
 
 func (s *eventStore) Ping(ctx context.Context) error {
-	return s.conn.Ping(ctx)
+	return s.db.PingContext(ctx)
+}
+
+func (s *eventStore) isolationLevel(level eventsource.TxIsoLevel) sql.IsolationLevel {
+	switch level {
+	case eventsource.Serializable:
+		return sql.LevelSerializable
+	case eventsource.RepeatableRead:
+		return sql.LevelRepeatableRead
+	case eventsource.ReadCommitted:
+		return sql.LevelReadCommitted
+	case eventsource.ReadUncommitted:
+		return sql.LevelReadUncommitted
+	}
+
+	return sql.LevelDefault
+}
+
+func (s *eventStore) readOnly(level eventsource.TxAccessMode) bool {
+	if level == eventsource.ReadOnly {
+		return true
+	}
+
+	return false
 }
 
 func (s *eventStore) BeginTransaction(ctx context.Context, opts eventsource.BeginTransactionOptions) (eventsource.Transaction, error) {
-	return s.conn.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel:       pgx.TxIsoLevel(opts.IsolationLevel),
-		AccessMode:     pgx.TxAccessMode(opts.AccessMode),
-		DeferrableMode: pgx.TxDeferrableMode(opts.DeferrableMode),
+	ctx, span := s.tracer.Start(ctx, "eventStore.BeginTransaction")
+
+	defer span.End()
+	isolationLevel := s.isolationLevel(opts.IsolationLevel)
+	readOnly := s.readOnly(opts.AccessMode)
+
+	span.SetAttributes(attribute.Bool("db.transaction.mode.readOnly", readOnly))
+	span.SetAttributes(attribute.String("db.transaction.isolation.level", isolationLevel.String()))
+
+	return s.db.BeginTxx(ctx, &sql.TxOptions{
+		Isolation: isolationLevel,
+		ReadOnly:  s.readOnly(opts.AccessMode),
 	})
 }
 
-func (s *eventStore) Save(ctx context.Context, tx eventsource.Transaction, a eventsource.Aggregator, opts eventsource.SaveOptions) error {
-	defer timetracker.Log(time.Now(), "eventstore:save")
+func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a eventsource.Aggregator, opts eventsource.SaveOptions) error {
+	ctx, span := s.tracer.Start(ctx, "eventStore.Save")
+	defer span.End()
 
-	if tx == nil {
+	if t == nil {
 		return eventsource.ErrTransactionIsRequired
 	}
 
-	events, err := s.save(ctx, tx.(pgx.Tx), s.eventTableName(), a)
+	tx := t.(*sqlx.Tx)
+
+	events, err := s.save(ctx, tx, s.options.eventStorageParams.tableName, a)
 	if err != nil {
 		return err
 	}
 
 	if opts.MustSendToOutbox {
-		if err := s.saveToOutbox(ctx, tx, s.outboxTableName(), events); err != nil {
+		if err := s.saveToOutbox(ctx, tx, events); err != nil {
 			return err
 		}
 	}
@@ -65,7 +113,7 @@ func (s *eventStore) Save(ctx context.Context, tx eventsource.Transaction, a eve
 	if opts.WithSnapshot {
 		snapshots := a.SnapshotsWithFrequency(opts.WithSnapshotFrequency)
 		if len(snapshots) > 0 {
-			if err := s.saveSnapshots(ctx, tx, s.snapshotTableName(), snapshots...); err != nil {
+			if err := s.saveSnapshots(ctx, tx, snapshots...); err != nil {
 				return err
 			}
 		}
@@ -74,228 +122,57 @@ func (s *eventStore) Save(ctx context.Context, tx eventsource.Transaction, a eve
 	return nil
 }
 
-func (s *eventStore) Load(ctx context.Context, tx eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser) (eventsource.Aggregator, error) {
-	defer timetracker.Log(time.Now(), "eventstore:load")
+func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, table string, a eventsource.Aggregator) ([]Event, error) {
+	ctx, span := s.tracer.Start(ctx, "eventStore.save")
+	defer span.End()
 
-	if tx == nil {
-		return nil, eventsource.ErrTransactionIsRequired
-	}
-
-	if parser == nil {
-		return nil, eventsource.ErrAggregateParserIsRequired
-	}
-
-	latestSnapshot, err := s.loadLatestSnapshot(ctx, tx, id)
-	if err != nil && !eventsource.ErrIsSnapshotNotFound(err) {
-		return nil, err
-	}
-
-	snapshotExist := false
-	fromVersion := eventsource.AggregateVersion(1)
-	if !eventsource.ErrIsSnapshotNotFound(err) {
-		fromVersion = latestSnapshot.AggregateVersion.NextVersion()
-		snapshotExist = true
-	}
-
-	ee, err := s.loadEvents(ctx, tx, id, fromVersion)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(ee) == 0 && !snapshotExist {
-		return nil, eventsource.ErrAggregateDoNotExist
-	}
-
-	var events = make([]eventsource.Event, 0)
-	for _, e := range ee {
-		ev := parser.ParseEvent(e)
-		events = append(events, ev)
-	}
-
-	a := parser.Replay(id, latestSnapshot, events...)
-
-	return a, nil
-}
-
-func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, fromVersion eventsource.AggregateVersion) ([]eventsource.EventReadModel, error) {
-	tx := t.(pgx.Tx)
-
-	tableName := s.eventTableName()
-
-	b := strings.Builder{}
-
-	b.WriteString("select id, type, occurred_at, aggregate_id, aggregate_type, aggregate_version, data, metadata, registered_at ")
-	b.WriteString(fmt.Sprintf("from %s ", tableName))
-	b.WriteString("where aggregate_id = $1 ")
-	b.WriteString("and aggregate_version >= $2 ")
-	b.WriteString("order by aggregate_version; ")
-
-	query := b.String()
-
-	msg := fmt.Sprintf("loading events for aggregate '%s' from version %d", id, fromVersion)
-
-	log.Println(msg)
-
-	stmt, err := tx.Prepare(ctx, msg, query)
-	if err != nil {
-		return nil, err
-	}
-
-	rows, err := tx.Query(ctx, stmt.Name, id.String(), fromVersion)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	events := make([]eventsource.EventReadModel, 0)
-	for rows.Next() {
-		var event Event
-		if err := rows.Scan(
-			&event.ID,
-			&event.Type,
-			&event.OccurredAt,
-			&event.AggregateID,
-			&event.AggregateType,
-			&event.AggregateVersion,
-			&event.Data,
-			&event.Metadata,
-			&event.RegisteredAt,
-		); err != nil {
-			return nil, err
-		}
-
-		events = append(events, event.ToReadModel())
-	}
-
-	return events, nil
-}
-
-func (s *eventStore) schemaName() string {
-	return strings.TrimSpace(s.schema)
-}
-
-func (s *eventStore) outboxTableName() string {
-	return s.buildTableName("outbox")
-}
-
-func (s *eventStore) snapshotTableName() string {
-	return s.buildTableName("snapshot")
-}
-
-func (s *eventStore) eventTableName() string {
-	return s.buildTableName("event")
-}
-
-func (s *eventStore) buildTableName(tableName string) string {
-	schema := s.schemaName()
-	if schema == "" {
-		return tableName
-	}
-
-	return fmt.Sprintf("%s.%s", schema, tableName)
-}
-
-func (s *eventStore) saveSnapshots(ctx context.Context, tx eventsource.Transaction, table string, ss ...*eventsource.Snapshot) error {
-	t := tx.(pgx.Tx)
-
-	columns := []string{
-		"aggregate_id",
-		"aggregate_type",
-		"aggregate_version",
-		"taken_at",
-		"registered_at",
-		"data",
-	}
-
-	batch := &pgx.Batch{}
-	q := fmt.Sprintf("insert into %s (%s) values($1, $2, $3, $4, now(), $5);", table, strings.Join(columns, ", "))
-	for _, s := range ss {
-		batch.Queue(q,
-			s.AggregateID.String(),
-			s.AggregateType.String(),
-			s.AggregateVersion.Int64(),
-			s.TakenAt,
-			s.Data,
-		)
-	}
-
-	result := t.SendBatch(ctx, batch)
-	if _, err := result.Exec(); err != nil {
-		return err
-	}
-
-	defer result.Close()
-
-	return nil
-}
-
-func (s *eventStore) loadLatestSnapshot(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID) (*eventsource.Snapshot, error) {
-	tx := t.(pgx.Tx)
-
-	tableName := s.snapshotTableName()
-
-	b := strings.Builder{}
-
-	b.WriteString("select aggregate_id, aggregate_type, aggregate_version, taken_at, data ")
-	b.WriteString(fmt.Sprintf("from %s ", tableName))
-	b.WriteString("where aggregate_id = $1 ")
-	b.WriteString("order by aggregate_version desc ")
-	b.WriteString("limit 1; ")
-
-	query := b.String()
-
-	msg := fmt.Sprintf("loading latest snapshot for aggregate '%s'", id)
-
-	log.Println(msg)
-
-	stmt, err := tx.Prepare(ctx, msg, query)
-	if err != nil {
-		return nil, err
-	}
-
-	row := tx.QueryRow(ctx, stmt.Name, id.String())
-
-	snapshot := Snapshot{}
-	if err := row.Scan(
-		&snapshot.AggregateID,
-		&snapshot.AggregateType,
-		&snapshot.AggregateVersion,
-		&snapshot.TakenAt,
-		&snapshot.Data,
-	); err != nil {
-		if err == pgx.ErrNoRows {
-			return nil, errors.Stack(err, eventsource.ErrNoSnapshotFound)
-		}
-		return nil, err
-	}
-
-	return snapshot.ToSnapshot(), nil
-}
-
-func (s *eventStore) save(ctx context.Context, tx pgx.Tx, table string, a eventsource.Aggregator) ([]Event, error) {
-	columns := []string{
-		"id",
-		"type",
-		"occurred_at",
-		"registered_at",
-		"aggregate_id",
-		"aggregate_type",
-		"aggregate_version",
-		"data",
-		"metadata",
-	}
-
-	if len(a.Changes()) == 0 {
+	events := a.Changes()
+	if len(events) == 0 {
 		return nil, eventsource.ErrNoEventsToStore
 	}
 
-	query, values := buildInsertEvents(table, columns, a.Changes())
-	stmt, err := tx.Prepare(ctx, fmt.Sprintf("%v", a.Changes()), query)
+	insertBuilder := squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar).
+		Insert(s.eventsTableName()).
+		Columns(
+			"id",
+			"type",
+			"occurred_at",
+			"registered_at",
+			"aggregate_id",
+			"aggregate_type",
+			"aggregate_version",
+			"data",
+			"metadata",
+		).
+		Suffix("returning id, type, occurred_at, registered_at, aggregate_id, aggregate_type, aggregate_version, data, metadata")
+
+	for _, e := range events {
+		insertBuilder = insertBuilder.Values(
+			sql.NullString{String: e.ID().String(), Valid: !e.ID().IsZero()},
+			sql.NullString{String: e.Type().String(), Valid: !e.Type().IsZero()},
+			sql.NullTime{Time: e.OccurredAt(), Valid: !e.OccurredAt().IsZero()},
+			"now()",
+			sql.NullString{String: e.AggregateID().String(), Valid: !e.AggregateID().IsZero()},
+			sql.NullString{String: e.AggregateType().String(), Valid: !e.AggregateType().IsZero()},
+			sql.NullInt64{Int64: e.AggregateVersion().Int64(), Valid: !e.AggregateVersion().IsZero()},
+			e.Data(),
+			e.Metadata(),
+		)
+	}
+
+	query, args, err := insertBuilder.ToSql()
 	if err != nil {
 		return nil, err
 	}
 
-	rows, err := tx.Query(ctx, stmt.Name, values...)
+	fmt.Println(query)
+
+	stmt, err := tx.PreparexContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := stmt.QueryxContext(ctx, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -330,114 +207,247 @@ func (s *eventStore) save(ctx context.Context, tx pgx.Tx, table string, a events
 	return eventsDB, nil
 }
 
-func (s *eventStore) saveToOutbox(ctx context.Context, tx eventsource.Transaction, tableName string, ee []Event) error {
-	t := tx.(pgx.Tx)
+func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser) (eventsource.Aggregator, error) {
+	ctx, span := s.tracer.Start(ctx, "eventStore.Load")
+	defer span.End()
 
-	columns := []string{
-		"event_id",
-		"registered_at",
-		"acknowledged",
-		"acknowledged_at",
+	if t == nil {
+		return nil, eventsource.ErrTransactionIsRequired
 	}
 
-	batch := &pgx.Batch{}
-	q := fmt.Sprintf("insert into %s (%s) values($1, now(), false, null);", tableName, strings.Join(columns, ", "))
+	if parser == nil {
+		return nil, eventsource.ErrAggregateParserIsRequired
+	}
+
+	tx := t.(*sqlx.Tx)
+
+	latestSnapshot, err := s.loadLatestSnapshot(ctx, tx, id)
+	if err != nil && !eventsource.ErrIsSnapshotNotFound(err) {
+		return nil, err
+	}
+
+	snapshotExist := false
+	fromVersion := eventsource.AggregateVersion(1)
+	if !eventsource.ErrIsSnapshotNotFound(err) {
+		fromVersion = latestSnapshot.AggregateVersion.NextVersion()
+		snapshotExist = true
+	}
+
+	ee, err := s.loadEvents(ctx, tx, id, fromVersion)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(ee) == 0 && !snapshotExist {
+		return nil, eventsource.ErrAggregateDoNotExist
+	}
+
+	var events = make([]eventsource.Event, 0)
 	for _, e := range ee {
-		batch.Queue(q,
-			e.ID,
+		ev := parser.ParseEvent(e)
+		events = append(events, ev)
+	}
+
+	a := parser.Replay(id, latestSnapshot, events...)
+
+	return a, nil
+}
+
+func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, fromVersion eventsource.AggregateVersion) ([]eventsource.EventReadModel, error) {
+	ctx, span := s.tracer.Start(ctx, "eventStore.loadEvents")
+	defer span.End()
+
+	tx := t.(*sqlx.Tx)
+
+	b := strings.Builder{}
+
+	b.WriteString("select id, type, occurred_at, aggregate_id, aggregate_type, aggregate_version, data, metadata, registered_at ")
+	b.WriteString(fmt.Sprintf("from %s ", s.eventsTableName()))
+	b.WriteString("where aggregate_id = $1 ")
+	b.WriteString("and aggregate_version >= $2 ")
+	b.WriteString("order by aggregate_version; ")
+
+	query := b.String()
+
+	stmt, err := tx.PrepareContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := stmt.QueryContext(ctx, id.String(), fromVersion)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	events := make([]eventsource.EventReadModel, 0)
+	for rows.Next() {
+		var event Event
+		if err := rows.Scan(
+			&event.ID,
+			&event.Type,
+			&event.OccurredAt,
+			&event.AggregateID,
+			&event.AggregateType,
+			&event.AggregateVersion,
+			&event.Data,
+			&event.Metadata,
+			&event.RegisteredAt,
+		); err != nil {
+			return nil, err
+		}
+
+		events = append(events, event.ToReadModel())
+	}
+
+	return events, nil
+}
+
+func (s *eventStore) computeTableName(tableName string) string {
+	schema := s.options.schemaName
+	if schema == "" {
+		return tableName
+	}
+
+	return fmt.Sprintf("%s.%s", schema, tableName)
+}
+
+func (s *eventStore) saveSnapshots(ctx context.Context, tx eventsource.Transaction, ss ...*eventsource.Snapshot) error {
+	ctx, span := s.tracer.Start(ctx, "eventStore.saveSnapshots")
+	defer span.End()
+
+	t := tx.(*sqlx.Tx)
+
+	insertBuilder := squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar).
+		Insert(s.snapshotsTableName()).
+		Columns(
+			"aggregate_id",
+			"aggregate_type",
+			"aggregate_version",
+			"taken_at",
+			"registered_at",
+			"data",
+		)
+
+	for _, snap := range ss {
+		insertBuilder = insertBuilder.Values(
+			snap.AggregateID.String(),
+			snap.AggregateType.String(),
+			snap.AggregateVersion.Int64(),
+			snap.TakenAt.UTC(),
+			time.Now().UTC(),
+			string(snap.Data),
 		)
 	}
 
-	result := t.SendBatch(ctx, batch)
-	if _, err := result.Exec(); err != nil {
+	query, args, err := insertBuilder.ToSql()
+	if err != nil {
 		return err
 	}
 
-	defer result.Close()
+	stmt, err := t.PrepareContext(ctx, query)
+	if err != nil {
+		return err
+	}
+
+	_, err = stmt.ExecContext(ctx, args...)
+	if err != nil {
+		return err
+	}
+
+	err = stmt.Close()
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
 
-func buildInsertEvents(table string, columns []string, events []eventsource.Event) (string, []interface{}) {
-	var b strings.Builder
-	var aliasNumber int
+func (s *eventStore) loadLatestSnapshot(ctx context.Context, tx *sqlx.Tx, id eventsource.AggregateID) (*eventsource.Snapshot, error) {
+	ctx, span := s.tracer.Start(ctx, "eventStore.loadLatestSnapshot")
+	defer span.End()
 
-	eventsCount := len(events)
-	if eventsCount == 0 {
-		return "", nil
+	b := strings.Builder{}
+
+	b.WriteString("select aggregate_id, aggregate_type, aggregate_version, taken_at, data ")
+	b.WriteString(fmt.Sprintf("from %s ", s.snapshotsTableName()))
+	b.WriteString("where aggregate_id = $1 ")
+	b.WriteString("order by aggregate_version desc ")
+	b.WriteString("limit 1; ")
+
+	query := b.String()
+
+	stmt, err := tx.PreparexContext(ctx, query)
+	if err != nil {
+		return nil, err
 	}
 
-	columnCount := len(columns)
+	row := stmt.QueryRowContext(ctx, id.String())
 
-	b.WriteString("insert into " + table + "(" + strings.Join(columns, ", ") + ") values ")
-
-	valueArgs := make([]interface{}, 0, columnCount*eventsCount)
-	for eventIndex, e := range events {
-		b.WriteString("(")
-
-		aliases := make([]string, columnCount)
-		for columnIndex, column := range columns {
-			aliasNumber++
-
-			aliases[columnIndex] = fmt.Sprintf("$%d", aliasNumber)
-			valueArgs = append(valueArgs, eventValueFromString(column, e))
+	snapshot := Snapshot{}
+	if err := row.Scan(
+		&snapshot.AggregateID,
+		&snapshot.AggregateType,
+		&snapshot.AggregateVersion,
+		&snapshot.TakenAt,
+		&snapshot.Data,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, errors.Stack(err, eventsource.ErrNoSnapshotFound)
 		}
-
-		b.WriteString(strings.Join(aliases, ", "))
-		b.WriteString(")")
-
-		if eventIndex != eventsCount-1 {
-			b.WriteString(",")
-		}
+		return nil, err
 	}
 
-	b.WriteString(" returning id, type, occurred_at, registered_at, aggregate_id, aggregate_type, aggregate_version, data, metadata;")
-
-	return b.String(), valueArgs
+	return snapshot.ToSnapshot(), nil
 }
 
-func eventValueFromString(s string, event eventsource.Event) interface{} {
-	switch s {
-	case "id":
-		return sql.NullString{
-			String: event.ID().String(),
-			Valid:  !event.ID().IsZero(),
-		}
-	case "type":
-		return sql.NullString{
-			String: event.Type().String(),
-			Valid:  !event.Type().IsZero(),
-		}
-	case "occurred_at":
-		return sql.NullTime{
-			Time:  event.OccurredAt(),
-			Valid: !event.OccurredAt().IsZero(),
-		}
-	case "registered_at":
-		return sql.NullTime{
-			Time:  time.Now(),
-			Valid: true,
-		}
-	case "aggregate_id":
-		return sql.NullString{
-			String: event.AggregateID().String(),
-			Valid:  !event.AggregateID().IsZero(),
-		}
-	case "aggregate_type":
-		return sql.NullString{
-			String: event.AggregateType().String(),
-			Valid:  !event.AggregateType().IsZero(),
-		}
-	case "aggregate_version":
-		return sql.NullInt64{
-			Int64: event.AggregateVersion().Int64(),
-			Valid: !event.AggregateVersion().IsZero(),
-		}
-	case "data":
-		return event.Data()
-	case "metadata":
-		return event.Metadata()
-	default:
-		return nil
+func (s *eventStore) saveToOutbox(ctx context.Context, tx *sqlx.Tx, ee []Event) error {
+	ctx, span := s.tracer.Start(ctx, "eventStore.saveToOutbox")
+	defer span.End()
+
+	insertBuilder := squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar).
+		Insert(s.outboxTableName()).
+		Columns(
+			"event_id",
+			"registered_at",
+			"acknowledged",
+		)
+
+	for _, e := range ee {
+		insertBuilder = insertBuilder.Values(e.ID, "now()", false)
 	}
+
+	query, args, err := insertBuilder.ToSql()
+	if err != nil {
+		return err
+	}
+
+	stmt, err := tx.PreparexContext(ctx, query)
+	if err != nil {
+		return err
+	}
+
+	_, err = stmt.ExecContext(ctx, args...)
+	if err != nil {
+		return err
+	}
+
+	err = stmt.Close()
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (s *eventStore) eventsTableName() string {
+	return s.computeTableName(s.options.eventStorageParams.tableName)
+}
+
+func (s *eventStore) snapshotsTableName() string {
+	return s.computeTableName(s.options.snapshotStorageParams.tableName)
+}
+
+func (s *eventStore) outboxTableName() string {
+	return s.computeTableName(s.options.outboxStorageParams.tableName)
 }
