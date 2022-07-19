@@ -15,6 +15,7 @@ import (
 	"github.com/uptrace/opentelemetry-go-extra/otelsql"
 	"github.com/uptrace/opentelemetry-go-extra/otelsqlx"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -22,6 +23,10 @@ import (
 func NewEventStore(connString string, tracer trace.Tracer, options *Options) (eventsource.EventStore, error) {
 	if options == nil || options.IsZero() {
 		options = DefaultOptions()
+	}
+
+	if len(strings.TrimSpace(options.schemaName)) == 0 {
+		options.schemaName = "es"
 	}
 
 	db, err := otelsqlx.Open("postgres", connString, otelsql.WithAttributes(semconv.DBSystemPostgreSQL))
@@ -50,43 +55,28 @@ func (s *eventStore) Ping(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
-func (s *eventStore) isolationLevel(level eventsource.TxIsoLevel) sql.IsolationLevel {
-	switch level {
-	case eventsource.Serializable:
-		return sql.LevelSerializable
-	case eventsource.RepeatableRead:
-		return sql.LevelRepeatableRead
-	case eventsource.ReadCommitted:
-		return sql.LevelReadCommitted
-	case eventsource.ReadUncommitted:
-		return sql.LevelReadUncommitted
-	}
-
-	return sql.LevelDefault
-}
-
-func (s *eventStore) readOnly(level eventsource.TxAccessMode) bool {
-	if level == eventsource.ReadOnly {
-		return true
-	}
-
-	return false
-}
-
 func (s *eventStore) BeginTransaction(ctx context.Context, opts eventsource.BeginTransactionOptions) (eventsource.Transaction, error) {
 	ctx, span := s.tracer.Start(ctx, "eventStore.BeginTransaction")
-
 	defer span.End()
+
 	isolationLevel := s.isolationLevel(opts.IsolationLevel)
 	readOnly := s.readOnly(opts.AccessMode)
 
 	span.SetAttributes(attribute.Bool("db.transaction.mode.readOnly", readOnly))
 	span.SetAttributes(attribute.String("db.transaction.isolation.level", isolationLevel.String()))
 
-	return s.db.BeginTxx(ctx, &sql.TxOptions{
+	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{
 		Isolation: isolationLevel,
 		ReadOnly:  s.readOnly(opts.AccessMode),
 	})
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return nil, err
+	}
+
+	return tx, nil
 }
 
 func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a eventsource.Aggregator, opts eventsource.SaveOptions) error {
@@ -99,13 +89,17 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 
 	tx := t.(*sqlx.Tx)
 
-	events, err := s.save(ctx, tx, s.options.eventStorageParams.tableName, a)
+	_, err := s.save(ctx, tx, s.options.eventStorageParams.tableName, a)
 	if err != nil {
+		span.RecordError(err)
+
 		return err
 	}
 
 	if opts.MustSendToOutbox {
-		if err := s.saveToOutbox(ctx, tx, events); err != nil {
+		if err := s.saveToOutbox(ctx, tx, a.Changes()); err != nil {
+			span.RecordError(err)
+
 			return err
 		}
 	}
@@ -114,12 +108,81 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 		snapshots := a.SnapshotsWithFrequency(opts.WithSnapshotFrequency)
 		if len(snapshots) > 0 {
 			if err := s.saveSnapshots(ctx, tx, snapshots...); err != nil {
+				span.RecordError(err)
+
 				return err
 			}
 		}
 	}
 
 	return nil
+}
+
+func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser) (eventsource.Aggregator, error) {
+	ctx, span := s.tracer.Start(ctx, "eventStore.Load")
+	defer span.End()
+
+	if t == nil {
+		err := eventsource.ErrTransactionIsRequired
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return nil, err
+	}
+
+	if parser == nil {
+		err := eventsource.ErrAggregateParserIsRequired
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return nil, err
+	}
+
+	tx := t.(*sqlx.Tx)
+
+	latestSnapshot, err := s.loadLatestSnapshot(ctx, tx, id)
+	if err != nil && !eventsource.ErrIsSnapshotNotFound(err) {
+		span.RecordError(err)
+
+		return nil, err
+	}
+
+	snapshotExist := false
+	fromVersion := eventsource.AggregateVersion(1)
+	if eventsource.ErrIsSnapshotNotFound(err) {
+		span.RecordError(err)
+	} else {
+		fromVersion = latestSnapshot.AggregateVersion.NextVersion()
+		snapshotExist = true
+	}
+
+	ee, err := s.loadEvents(ctx, tx, id, fromVersion)
+	if err != nil {
+		span.RecordError(err)
+
+		return nil, err
+	}
+
+	if len(ee) == 0 && !snapshotExist {
+		err := eventsource.ErrAggregateDoNotExist
+
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return nil, err
+	}
+
+	var events = make([]eventsource.Event, 0)
+	for _, e := range ee {
+		ev := parser.ParseEvent(e)
+		events = append(events, ev)
+	}
+
+	a := parser.Replay(id, latestSnapshot, events...)
+
+	return a, nil
 }
 
 func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, table string, a eventsource.Aggregator) ([]Event, error) {
@@ -162,21 +225,19 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, table string, a even
 
 	query, args, err := insertBuilder.ToSql()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
 		return nil, err
 	}
 
-	fmt.Println(query)
-
-	stmt, err := tx.PreparexContext(ctx, query)
+	rows, err := tx.QueryxContext(ctx, query, args...)
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
 		return nil, err
 	}
-
-	rows, err := stmt.QueryxContext(ctx, args...)
-	if err != nil {
-		return nil, err
-	}
-
 	defer rows.Close()
 
 	var eventsDB []Event
@@ -198,6 +259,9 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, table string, a even
 			&e.Data,
 			&e.Metadata,
 		); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
 			return nil, err
 		}
 
@@ -205,52 +269,6 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, table string, a even
 	}
 
 	return eventsDB, nil
-}
-
-func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser) (eventsource.Aggregator, error) {
-	ctx, span := s.tracer.Start(ctx, "eventStore.Load")
-	defer span.End()
-
-	if t == nil {
-		return nil, eventsource.ErrTransactionIsRequired
-	}
-
-	if parser == nil {
-		return nil, eventsource.ErrAggregateParserIsRequired
-	}
-
-	tx := t.(*sqlx.Tx)
-
-	latestSnapshot, err := s.loadLatestSnapshot(ctx, tx, id)
-	if err != nil && !eventsource.ErrIsSnapshotNotFound(err) {
-		return nil, err
-	}
-
-	snapshotExist := false
-	fromVersion := eventsource.AggregateVersion(1)
-	if !eventsource.ErrIsSnapshotNotFound(err) {
-		fromVersion = latestSnapshot.AggregateVersion.NextVersion()
-		snapshotExist = true
-	}
-
-	ee, err := s.loadEvents(ctx, tx, id, fromVersion)
-	if err != nil {
-		return nil, err
-	}
-
-	if len(ee) == 0 && !snapshotExist {
-		return nil, eventsource.ErrAggregateDoNotExist
-	}
-
-	var events = make([]eventsource.Event, 0)
-	for _, e := range ee {
-		ev := parser.ParseEvent(e)
-		events = append(events, ev)
-	}
-
-	a := parser.Replay(id, latestSnapshot, events...)
-
-	return a, nil
 }
 
 func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, fromVersion eventsource.AggregateVersion) ([]eventsource.EventReadModel, error) {
@@ -269,13 +287,11 @@ func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, 
 
 	query := b.String()
 
-	stmt, err := tx.PrepareContext(ctx, query)
+	rows, err := tx.QueryContext(ctx, query, id.String(), fromVersion)
 	if err != nil {
-		return nil, err
-	}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 
-	rows, err := stmt.QueryContext(ctx, id.String(), fromVersion)
-	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
@@ -294,6 +310,9 @@ func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, 
 			&event.Metadata,
 			&event.RegisteredAt,
 		); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+
 			return nil, err
 		}
 
@@ -342,21 +361,17 @@ func (s *eventStore) saveSnapshots(ctx context.Context, tx eventsource.Transacti
 
 	query, args, err := insertBuilder.ToSql()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
 		return err
 	}
 
-	stmt, err := t.PrepareContext(ctx, query)
+	_, err = t.ExecContext(ctx, query, args...)
 	if err != nil {
-		return err
-	}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 
-	_, err = stmt.ExecContext(ctx, args...)
-	if err != nil {
-		return err
-	}
-
-	err = stmt.Close()
-	if err != nil {
 		return err
 	}
 
@@ -377,12 +392,7 @@ func (s *eventStore) loadLatestSnapshot(ctx context.Context, tx *sqlx.Tx, id eve
 
 	query := b.String()
 
-	stmt, err := tx.PreparexContext(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-
-	row := stmt.QueryRowContext(ctx, id.String())
+	row := tx.QueryRowContext(ctx, query, id.String())
 
 	snapshot := Snapshot{}
 	if err := row.Scan(
@@ -392,16 +402,20 @@ func (s *eventStore) loadLatestSnapshot(ctx context.Context, tx *sqlx.Tx, id eve
 		&snapshot.TakenAt,
 		&snapshot.Data,
 	); err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
 		if err == sql.ErrNoRows {
 			return nil, errors.Stack(err, eventsource.ErrNoSnapshotFound)
 		}
+
 		return nil, err
 	}
 
 	return snapshot.ToSnapshot(), nil
 }
 
-func (s *eventStore) saveToOutbox(ctx context.Context, tx *sqlx.Tx, ee []Event) error {
+func (s *eventStore) saveToOutbox(ctx context.Context, tx *sqlx.Tx, ee []eventsource.Event) error {
 	ctx, span := s.tracer.Start(ctx, "eventStore.saveToOutbox")
 	defer span.End()
 
@@ -414,26 +428,22 @@ func (s *eventStore) saveToOutbox(ctx context.Context, tx *sqlx.Tx, ee []Event) 
 		)
 
 	for _, e := range ee {
-		insertBuilder = insertBuilder.Values(e.ID, "now()", false)
+		insertBuilder = insertBuilder.Values(e.ID(), "now()", false)
 	}
 
 	query, args, err := insertBuilder.ToSql()
 	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
 		return err
 	}
 
-	stmt, err := tx.PreparexContext(ctx, query)
+	_, err = tx.ExecContext(ctx, query, args...)
 	if err != nil {
-		return err
-	}
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
 
-	_, err = stmt.ExecContext(ctx, args...)
-	if err != nil {
-		return err
-	}
-
-	err = stmt.Close()
-	if err != nil {
 		return err
 	}
 
@@ -450,4 +460,27 @@ func (s *eventStore) snapshotsTableName() string {
 
 func (s *eventStore) outboxTableName() string {
 	return s.computeTableName(s.options.outboxStorageParams.tableName)
+}
+
+func (s *eventStore) isolationLevel(level eventsource.TxIsoLevel) sql.IsolationLevel {
+	switch level {
+	case eventsource.Serializable:
+		return sql.LevelSerializable
+	case eventsource.RepeatableRead:
+		return sql.LevelRepeatableRead
+	case eventsource.ReadCommitted:
+		return sql.LevelReadCommitted
+	case eventsource.ReadUncommitted:
+		return sql.LevelReadUncommitted
+	}
+
+	return sql.LevelDefault
+}
+
+func (s *eventStore) readOnly(level eventsource.TxAccessMode) bool {
+	if level == eventsource.ReadOnly {
+		return true
+	}
+
+	return false
 }

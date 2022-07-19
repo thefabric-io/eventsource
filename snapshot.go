@@ -7,6 +7,7 @@ import (
 
 type Snapshoter interface {
 	Snapshot() (*Snapshot, error)
+	ForceSnapshot() *Snapshot
 }
 
 type Snapshot struct {

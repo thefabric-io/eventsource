@@ -84,19 +84,14 @@ func On(a Aggregator, event Event) {
 
 		a.IncrementVersion()
 
-		s, err := a.Snapshot()
-		if err != nil {
-			log.Printf("error snapshoting aggregate with id `%s`", event.AggregateID())
-		}
-
-		a.StackSnapshot(s)
+		a.StackSnapshot(a.ForceSnapshot())
 	}
 }
 
 func (a *BaseAggregate) ForceSnapshot() *Snapshot {
 	s, err := a.Snapshot()
 	if err != nil {
-		log.Printf("error on forcing snapshot: %s", err)
+		log.Printf("error snapshoting aggregate with id `%s`", a.ID())
 	}
 
 	return s

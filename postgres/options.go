@@ -2,6 +2,7 @@ package postgres
 
 func DefaultOptions() *Options {
 	return &Options{
+		schemaName:            defaultSchemaName(),
 		eventStorageParams:    defaultEventStorageParams(),
 		outboxStorageParams:   defaultOutboxStorageParams(),
 		snapshotStorageParams: defaultSnapshotStorageParams(),
@@ -53,6 +54,10 @@ func (b *OptionsBuilder) WithSnapshotStorageTableName(name string) *OptionsBuild
 
 func (b *OptionsBuilder) Build() *Options {
 	return b.options
+}
+
+func defaultSchemaName() string {
+	return "es"
 }
 
 func defaultEventStorageParams() eventStorageParams {
