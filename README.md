@@ -1,3 +1,5 @@
+[![Go Report](https://goreportcard.com/badge/github.com/thefabric-io/eventsource)](https://goreportcard.com/badge/github.com/thefabric-io/eventsource)
+
 # Eventsource
 
 Eventsource is a package helping you to implement eventsourcing concept. 
