@@ -12,15 +12,12 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/thefabric-io/errors"
 	"github.com/thefabric-io/eventsource"
-	"github.com/uptrace/opentelemetry-go-extra/otelsql"
-	"github.com/uptrace/opentelemetry-go-extra/otelsqlx"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-	semconv "go.opentelemetry.io/otel/semconv/v1.10.0"
 	"go.opentelemetry.io/otel/trace"
 )
 
-func NewEventStore(connString string, tracer trace.Tracer, options *Options) (eventsource.EventStore, error) {
+func NewEventStore(db *sqlx.DB, tracer trace.Tracer, options *Options) (eventsource.EventStore, error) {
 	if options == nil || options.IsZero() {
 		options = DefaultOptions()
 	}
@@ -29,12 +26,7 @@ func NewEventStore(connString string, tracer trace.Tracer, options *Options) (ev
 		options.schemaName = "es"
 	}
 
-	db, err := otelsqlx.Open("postgres", connString, otelsql.WithAttributes(semconv.DBSystemPostgreSQL))
-	if err != nil {
-		return nil, err
-	}
-
-	if err := db.Ping(); err != nil {
+	if err := options.Validate(); err != nil {
 		return nil, err
 	}
 

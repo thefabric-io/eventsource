@@ -1,5 +1,10 @@
 package postgres
 
+import (
+	"fmt"
+	"strings"
+)
+
 func DefaultOptions() *Options {
 	return &Options{
 		schemaName:            defaultSchemaName(),
@@ -14,6 +19,17 @@ type Options struct {
 	eventStorageParams    eventStorageParams
 	outboxStorageParams   outboxStorageParams
 	snapshotStorageParams snapshotStorageParams
+}
+
+func (o *Options) Validate() error {
+	if len(strings.TrimSpace(o.schemaName)) == 0 ||
+		len(strings.TrimSpace(o.eventStorageParams.tableName)) == 0 ||
+		len(strings.TrimSpace(o.outboxStorageParams.tableName)) == 0 ||
+		len(strings.TrimSpace(o.snapshotStorageParams.tableName)) == 0 {
+		return fmt.Errorf("options invalid")
+	}
+
+	return nil
 }
 
 func (o *Options) IsZero() bool {
