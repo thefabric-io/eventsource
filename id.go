@@ -4,13 +4,13 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/google/uuid"
+	"github.com/segmentio/ksuid"
 )
 
 func NewID(p IdentityPrefix) AggregateID {
 	p = newIDPrefix(string(p))
 
-	return AggregateID(fmt.Sprintf("%s|%s", p[0:idPrefixLen], uuid.NewString()))
+	return AggregateID(fmt.Sprintf("%s_%s", p[0:idPrefixLen], ksuid.New().String()))
 }
 
 type AggregateID string

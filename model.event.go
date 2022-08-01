@@ -6,8 +6,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
 func Sort(ee []Event) {
@@ -43,7 +41,7 @@ func (t EventType) IsZero() bool {
 }
 
 func NewEventModel(from Aggregator, metadata Metadata) *BaseEvent {
-	return initEventModel(EventID(uuid.New().String()), time.Now(), from.ID(), from.Type(), from.Version(), metadata)
+	return initEventModel(EventID(NewID("evt")), time.Now(), from.ID(), from.Type(), from.Version(), metadata)
 }
 
 func initEventModel(id EventID, occurredAt time.Time, aggregateID AggregateID, aggregateType AggregateType, version AggregateVersion, metadata Metadata) *BaseEvent {
