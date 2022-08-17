@@ -69,10 +69,10 @@ func Raise(aggregate Aggregator, change Event) {
 
 	change.SetVersion(aggregate.Version() + 1)
 
-	On(aggregate, change)
+	On(aggregate, change, true)
 }
 
-func On(a Aggregator, event Event) {
+func On(a Aggregator, event Event, new bool) {
 	if a == nil || event == nil {
 		return
 	}
@@ -80,7 +80,12 @@ func On(a Aggregator, event Event) {
 	if a.Version() < event.AggregateVersion() {
 		event.ApplyTo(a)
 
-		log.Printf("applied event `%s` with id `%s` on aggregate with id `%s`", event.Type(), event.ID(), event.AggregateID())
+		action := "replayed"
+		if new {
+			action = "applied"
+		}
+
+		log.Printf("%s event `%s` with id `%s` on aggregate with id `%s`", action, event.Type(), event.ID(), event.AggregateID())
 
 		a.IncrementVersion()
 

@@ -110,7 +110,7 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 	return nil
 }
 
-func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser) (eventsource.Aggregator, error) {
+func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser, replayer eventsource.Replayer) (eventsource.Aggregator, error) {
 	ctx, span := s.tracer.Start(ctx, "eventStore.Load")
 	defer span.End()
 
@@ -172,7 +172,7 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 		events = append(events, ev)
 	}
 
-	a := parser.Replay(id, latestSnapshot, events...)
+	a := replayer.Replay(id, latestSnapshot, events...)
 
 	return a, nil
 }
