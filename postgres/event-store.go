@@ -39,7 +39,7 @@ type eventStore struct {
 	tracer  trace.Tracer
 }
 
-func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a eventsource.Aggregator, opts eventsource.SaveOptions) error {
+func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a eventsource.Aggregator, opts ...eventsource.SaveOption) error {
 	ctx, span := s.tracer.Start(ctx, "eventStore.Save")
 	defer span.End()
 
@@ -49,6 +49,8 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 
 	tx := t.(*sqlx.Tx)
 
+	options := eventsource.NewSaveOptions(opts...)
+
 	_, err := s.save(ctx, tx, s.options.eventStorageParams.tableName, a)
 	if err != nil {
 		span.RecordError(err)
@@ -56,7 +58,7 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 		return err
 	}
 
-	if opts.MustSendToOutbox {
+	if options.MustSendToOutbox {
 		if err := s.saveToOutbox(ctx, tx, a.Changes()); err != nil {
 			span.RecordError(err)
 
@@ -64,8 +66,8 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 		}
 	}
 
-	if opts.WithSnapshot {
-		snapshots := a.SnapshotsWithFrequency(opts.WithSnapshotFrequency)
+	if options.WithSnapshot {
+		snapshots := a.SnapshotsWithFrequency(options.WithSnapshotFrequency)
 		if len(snapshots) > 0 {
 			if err := s.saveSnapshots(ctx, tx, snapshots...); err != nil {
 				span.RecordError(err)
