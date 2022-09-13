@@ -12,12 +12,11 @@ import (
 	_ "github.com/lib/pq"
 	"github.com/thefabric-io/errors"
 	"github.com/thefabric-io/eventsource"
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 )
 
-func NewEventStore(db *sqlx.DB, tracer trace.Tracer, options *Options) (eventsource.EventStore, error) {
+func NewEventStore(tracer trace.Tracer, options *Options) (eventsource.EventStore, error) {
 	if options == nil || options.IsZero() {
 		options = DefaultOptions()
 	}
@@ -31,44 +30,14 @@ func NewEventStore(db *sqlx.DB, tracer trace.Tracer, options *Options) (eventsou
 	}
 
 	return &eventStore{
-		db:      db,
 		options: options,
 		tracer:  tracer,
 	}, nil
 }
 
 type eventStore struct {
-	db      *sqlx.DB
 	options *Options
 	tracer  trace.Tracer
-}
-
-func (s *eventStore) Ping(ctx context.Context) error {
-	return s.db.PingContext(ctx)
-}
-
-func (s *eventStore) BeginTransaction(ctx context.Context, opts eventsource.BeginTransactionOptions) (eventsource.Transaction, error) {
-	ctx, span := s.tracer.Start(ctx, "eventStore.BeginTransaction")
-	defer span.End()
-
-	isolationLevel := s.isolationLevel(opts.IsolationLevel)
-	readOnly := s.readOnly(opts.AccessMode)
-
-	span.SetAttributes(attribute.Bool("db.transaction.mode.readOnly", readOnly))
-	span.SetAttributes(attribute.String("db.transaction.isolation.level", isolationLevel.String()))
-
-	tx, err := s.db.BeginTxx(ctx, &sql.TxOptions{
-		Isolation: isolationLevel,
-		ReadOnly:  s.readOnly(opts.AccessMode),
-	})
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-
-		return nil, err
-	}
-
-	return tx, nil
 }
 
 func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a eventsource.Aggregator, opts eventsource.SaveOptions) error {
@@ -172,9 +141,7 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 		events = append(events, ev)
 	}
 
-	a := replayer.Replay(id, latestSnapshot, events...)
-
-	return a, nil
+	return replayer.Replay(id, latestSnapshot, events...), nil
 }
 
 func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, table string, a eventsource.Aggregator) ([]Event, error) {
@@ -452,27 +419,4 @@ func (s *eventStore) snapshotsTableName() string {
 
 func (s *eventStore) outboxTableName() string {
 	return s.computeTableName(s.options.outboxStorageParams.tableName)
-}
-
-func (s *eventStore) isolationLevel(level eventsource.TxIsoLevel) sql.IsolationLevel {
-	switch level {
-	case eventsource.Serializable:
-		return sql.LevelSerializable
-	case eventsource.RepeatableRead:
-		return sql.LevelRepeatableRead
-	case eventsource.ReadCommitted:
-		return sql.LevelReadCommitted
-	case eventsource.ReadUncommitted:
-		return sql.LevelReadUncommitted
-	}
-
-	return sql.LevelDefault
-}
-
-func (s *eventStore) readOnly(level eventsource.TxAccessMode) bool {
-	if level == eventsource.ReadOnly {
-		return true
-	}
-
-	return false
 }

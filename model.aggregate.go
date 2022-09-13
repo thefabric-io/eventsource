@@ -58,7 +58,7 @@ func NewBaseAggregate(id string, t AggregateType) (*BaseAggregate, error) {
 	return &res, nil
 }
 
-func InitAggregateModel(id AggregateID, a Aggregator) (*BaseAggregate, error) {
+func InitBaseAggregate(id AggregateID, a Aggregator) (*BaseAggregate, error) {
 	if a == nil {
 		return nil, ErrAggregateReferenceIsRequired
 	}
@@ -73,39 +73,6 @@ func InitAggregateModel(id AggregateID, a Aggregator) (*BaseAggregate, error) {
 	}
 
 	return &res, nil
-}
-
-func Raise(aggregate Aggregator, change Event) {
-	if aggregate == nil || change == nil {
-		return
-	}
-
-	aggregate.StackChange(change)
-
-	change.SetVersion(aggregate.Version() + 1)
-
-	On(aggregate, change, true)
-}
-
-func On(a Aggregator, event Event, new bool) {
-	if a == nil || event == nil {
-		return
-	}
-
-	if a.Version() < event.AggregateVersion() {
-		event.ApplyTo(a)
-
-		action := "replayed"
-		if new {
-			action = "applied"
-		}
-
-		log.Printf("%s event `%s` with id `%s` on aggregate with id `%s`", action, event.Type(), event.ID(), event.AggregateID())
-
-		a.IncrementVersion()
-
-		a.StackSnapshot(a.ForceSnapshot())
-	}
 }
 
 func (a *BaseAggregate) ForceSnapshot() *Snapshot {
