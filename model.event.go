@@ -28,7 +28,17 @@ type Event interface {
 	Metadata() json.RawMessage          // Metadata is app-specific metadata such as request AggregateID, originating user etc.
 }
 
-type Metadata = map[string]interface{}
+func NewMetadata() Metadata {
+	return Metadata{}
+}
+
+type Metadata map[string]interface{}
+
+func (m Metadata) Add(key string, value interface{}) Metadata {
+	m[key] = value
+
+	return m
+}
 
 type EventType string
 
@@ -40,11 +50,11 @@ func (t EventType) IsZero() bool {
 	return len(strings.TrimSpace(t.String())) == 0
 }
 
-func NewEventModel(from Aggregator, metadata Metadata) *BaseEvent {
-	return initEventModel(EventID(NewID("evt")), time.Now(), from.ID(), from.Type(), from.Version(), metadata)
+func NewBaseEvent(from Aggregator, metadata Metadata) *BaseEvent {
+	return initBaseEvent(EventID(NewEventID()), time.Now(), from.ID(), from.Type(), from.Version(), metadata)
 }
 
-func initEventModel(id EventID, occurredAt time.Time, aggregateID AggregateID, aggregateType AggregateType, version AggregateVersion, metadata Metadata) *BaseEvent {
+func initBaseEvent(id EventID, occurredAt time.Time, aggregateID AggregateID, aggregateType AggregateType, version AggregateVersion, metadata Metadata) *BaseEvent {
 	if metadata == nil {
 		metadata = make(Metadata, 0)
 	}
@@ -117,7 +127,7 @@ type EventReadModel struct {
 }
 
 func (r *EventReadModel) InitBaseEvent() *BaseEvent {
-	return initEventModel(
+	return initBaseEvent(
 		r.ID,
 		r.OccurredAt,
 		r.AggregateID,

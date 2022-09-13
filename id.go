@@ -7,12 +7,6 @@ import (
 	"github.com/segmentio/ksuid"
 )
 
-func NewID(p IdentityPrefix) AggregateID {
-	p = newIDPrefix(string(p))
-
-	return AggregateID(fmt.Sprintf("%s_%s", p[0:idPrefixLen], ksuid.New().String()))
-}
-
 type AggregateID string
 
 func (id AggregateID) String() string {
@@ -23,30 +17,8 @@ func (id AggregateID) IsZero() bool {
 	return len(strings.TrimSpace(string(id))) == 0
 }
 
-const idPrefixLen = 3
-
-func newIDPrefix(s string) IdentityPrefix {
-	if len(s) < idPrefixLen {
-		b := strings.Builder{}
-		b.WriteString(s)
-		for i := 0; i < idPrefixLen; i++ {
-			b.WriteString("x")
-		}
-
-		s = b.String()
-	}
-
-	return IdentityPrefix(s)
-}
-
-type IdentityPrefix string
-
-func (p IdentityPrefix) String() string {
-	return string(p)
-}
-
-func (p IdentityPrefix) IsZero() bool {
-	return len(strings.TrimSpace(string(p))) == 0
+func NewEventID() EventID {
+	return EventID(fmt.Sprintf("evt_%s", ksuid.New().String()))
 }
 
 type EventID string

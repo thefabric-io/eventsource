@@ -6,10 +6,14 @@ import (
 	"log"
 	"time"
 
-	"github.com/thefabric-io/errors"
+	"errors"
 )
 
-var ErrAggregateReferenceIsRequired = errors.New("aggregate reference is required and cannot be nil", "ErrAggregateReferenceIsRequired")
+var (
+	ErrAggregateReferenceIsRequired = errors.New("aggregate reference is required and cannot be nil")
+	ErrAggregateIDIsRequired        = errors.New("aggregate id is required")
+	ErrAggregateTypeIsRequired      = errors.New("aggregate type is required")
+)
 
 type Aggregator interface {
 	Snapshoter
@@ -34,13 +38,24 @@ type BaseAggregate struct {
 	data      any
 }
 
-func NewAggregateModel(p IdentityPrefix, a Aggregator) (*BaseAggregate, error) {
-	res, err := InitAggregateModel(NewID(p), a)
-	if err != nil {
-		return nil, err
+func NewBaseAggregate(id string, t AggregateType) (*BaseAggregate, error) {
+	aId := AggregateID(id)
+	if aId.IsZero() {
+		return nil, ErrAggregateIDIsRequired
 	}
 
-	return res, nil
+	if t.IsZero() {
+		return nil, ErrAggregateTypeIsRequired
+	}
+
+	res := BaseAggregate{
+		id:        AggregateID(id),
+		t:         t,
+		changes:   make([]Event, 0),
+		snapshots: make([]*Snapshot, 0),
+	}
+
+	return &res, nil
 }
 
 func InitAggregateModel(id AggregateID, a Aggregator) (*BaseAggregate, error) {
