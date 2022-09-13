@@ -2,20 +2,19 @@ package eventsource
 
 import (
 	"context"
-
-	"github.com/thefabric-io/errors"
+	"errors"
 )
 
 var (
-	ErrNoEventsToStore           = errors.New("no events to store", "ErrNoEventsToStore")
-	ErrAggregateParserIsRequired = errors.New("aggregate parser is required", "ErrAggregateParserIsRequired")
-	ErrNoSnapshotFound           = errors.New("no snapshot found", "ErrNoSnapshotFound")
-	ErrTransactionIsRequired     = errors.New("transaction is required", "ErrTransactionIsRequired")
-	ErrAggregateDoNotExist       = errors.New("aggregate do not exist", "ErrAggregateDoNotExist")
+	ErrNoEventsToStore       = errors.New("no events to store")
+	ErrEventParserIsRequired = errors.New("event parser is required")
+	ErrNoSnapshotFound       = errors.New("no snapshot found")
+	ErrTransactionIsRequired = errors.New("transaction is required")
+	ErrAggregateDoNotExist   = errors.New("aggregate do not exist")
 )
 
 func ErrIsSnapshotNotFound(err error) bool {
-	return errors.IsWithStrategy(err, ErrNoSnapshotFound, errors.CompareStrictStrategy())
+	return errors.Is(err, ErrNoSnapshotFound)
 }
 
 type SaveOptions struct {

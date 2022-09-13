@@ -10,7 +10,6 @@ import (
 	"github.com/Masterminds/squirrel"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
-	"github.com/thefabric-io/errors"
 	"github.com/thefabric-io/eventsource"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -93,7 +92,7 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 	}
 
 	if parser == nil {
-		err := eventsource.ErrAggregateParserIsRequired
+		err := eventsource.ErrEventParserIsRequired
 
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
@@ -365,7 +364,7 @@ func (s *eventStore) loadLatestSnapshot(ctx context.Context, tx *sqlx.Tx, id eve
 		span.SetStatus(codes.Error, err.Error())
 
 		if err == sql.ErrNoRows {
-			return nil, errors.Stack(err, eventsource.ErrNoSnapshotFound)
+			return nil, eventsource.ErrNoSnapshotFound
 		}
 
 		return nil, err
