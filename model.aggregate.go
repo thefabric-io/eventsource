@@ -1,22 +1,21 @@
 package eventsource
 
 import (
-	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"time"
-
-	"errors"
 )
 
 var (
 	ErrAggregateReferenceIsRequired = errors.New("aggregate reference is required and cannot be nil")
 	ErrAggregateIDIsRequired        = errors.New("aggregate id is required")
-	ErrAggregateTypeIsRequired      = errors.New("aggregate type is required")
 )
 
 type Aggregator interface {
 	Snapshoter
+	DataSerializer
+	SetBaseAggregate(*BaseAggregate) error
 	ID() AggregateID
 	Type() AggregateType
 	Version() AggregateVersion
@@ -26,7 +25,16 @@ type Aggregator interface {
 	StackedSnapshots() []*Snapshot
 	SnapshotsWithFrequency(frequency int) []*Snapshot
 	IncrementVersion()
-	Data() any
+}
+
+type Snapshoter interface {
+	Snapshot() (*Snapshot, error)
+	ForceSnapshot() *Snapshot
+}
+
+type DataSerializer interface {
+	Serialize() ([]byte, error)
+	Deserialize([]byte) error
 }
 
 type BaseAggregate struct {
@@ -35,41 +43,25 @@ type BaseAggregate struct {
 	v         AggregateVersion
 	changes   []Event
 	snapshots []*Snapshot
-	data      any
+	aggregate Aggregator
 }
 
-func NewBaseAggregate(id string, t AggregateType) (*BaseAggregate, error) {
-	aId := AggregateID(id)
-	if aId.IsZero() {
+func InitBaseAggregate(id AggregateID, ref Aggregator) (*BaseAggregate, error) {
+	if id.IsZero() {
 		return nil, ErrAggregateIDIsRequired
 	}
 
-	if t.IsZero() {
-		return nil, ErrAggregateTypeIsRequired
-	}
-
-	res := BaseAggregate{
-		id:        AggregateID(id),
-		t:         t,
-		changes:   make([]Event, 0),
-		snapshots: make([]*Snapshot, 0),
-	}
-
-	return &res, nil
-}
-
-func InitBaseAggregate(id AggregateID, a Aggregator) (*BaseAggregate, error) {
-	if a == nil {
+	if ref == nil {
 		return nil, ErrAggregateReferenceIsRequired
 	}
 
 	res := BaseAggregate{
 		id:        id,
-		t:         a.Type(),
+		t:         ref.Type(),
 		v:         0,
 		changes:   make([]Event, 0),
 		snapshots: make([]*Snapshot, 0),
-		data:      a.Data(),
+		aggregate: ref,
 	}
 
 	return &res, nil
@@ -95,7 +87,7 @@ func (a *BaseAggregate) Snapshot() (*Snapshot, error) {
 		Data:             nil,
 	}
 
-	s.Data, err = json.Marshal(a.data)
+	s.Data, err = a.aggregate.Serialize()
 	if err != nil {
 		err = fmt.Errorf("error marshaling aggregate with id '%s' and type '%s': %w", a.id, a.t, err)
 
@@ -107,8 +99,9 @@ func (a *BaseAggregate) Snapshot() (*Snapshot, error) {
 
 func (a *BaseAggregate) FromSnapshot(snapshot *Snapshot) {
 	if snapshot != nil {
-		if err := json.Unmarshal(snapshot.Data, a.data); err != nil {
-			log.Printf("error in replay from snapshot for aggregate with id '%s'", snapshot.AggregateID)
+
+		if err := a.aggregate.Deserialize(snapshot.Data); err != nil {
+			log.Printf("error unmarshaling from snapshot for aggregate with id '%s'", snapshot.AggregateID)
 		}
 
 		a.SetVersion(snapshot.AggregateVersion)
@@ -116,7 +109,7 @@ func (a *BaseAggregate) FromSnapshot(snapshot *Snapshot) {
 }
 
 func (a *BaseAggregate) IncrementVersion() {
-	a.v = a.v.NextVersion()
+	a.v = a.v.Next()
 }
 
 func (a *BaseAggregate) SetVersion(version AggregateVersion) {

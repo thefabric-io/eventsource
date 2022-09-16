@@ -2,7 +2,7 @@ package eventsource
 
 type AggregateVersion int
 
-func (v AggregateVersion) NextVersion() AggregateVersion {
+func (v AggregateVersion) Next() AggregateVersion {
 	return v + 1
 }
 

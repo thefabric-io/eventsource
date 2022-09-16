@@ -40,7 +40,7 @@ type eventStore struct {
 }
 
 func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a eventsource.Aggregator, opts ...eventsource.SaveOption) error {
-	ctx, span := s.tracer.Start(ctx, "eventStore.Save")
+	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.Save")
 	defer span.End()
 
 	if t == nil {
@@ -51,7 +51,7 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 
 	options := eventsource.NewSaveOptions(opts...)
 
-	_, err := s.save(ctx, tx, s.options.eventStorageParams.tableName, a)
+	_, err := s.save(ctx, tx, a)
 	if err != nil {
 		span.RecordError(err)
 
@@ -81,7 +81,7 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 }
 
 func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser, replayer eventsource.Replayer) (eventsource.Aggregator, error) {
-	ctx, span := s.tracer.Start(ctx, "eventStore.Load")
+	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.Load")
 	defer span.End()
 
 	if t == nil {
@@ -116,7 +116,7 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 	if eventsource.ErrIsSnapshotNotFound(err) {
 		span.RecordError(err)
 	} else {
-		fromVersion = latestSnapshot.AggregateVersion.NextVersion()
+		fromVersion = latestSnapshot.AggregateVersion.Next()
 		snapshotExist = true
 	}
 
@@ -142,11 +142,11 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 		events = append(events, ev)
 	}
 
-	return replayer.Replay(id, latestSnapshot, events...), nil
+	return replayer.Replay(id, latestSnapshot, events...)
 }
 
-func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, table string, a eventsource.Aggregator) ([]Event, error) {
-	ctx, span := s.tracer.Start(ctx, "eventStore.save")
+func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, a eventsource.Aggregator) ([]Event, error) {
+	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.save")
 	defer span.End()
 
 	events := a.Changes()
@@ -170,16 +170,21 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, table string, a even
 		Suffix("returning id, type, occurred_at, registered_at, aggregate_id, aggregate_type, aggregate_version, data, metadata")
 
 	for _, e := range events {
+		sqlEvent, err := FromEvent(e)
+		if err != nil {
+			return nil, err
+		}
+
 		insertBuilder = insertBuilder.Values(
-			sql.NullString{String: e.ID().String(), Valid: !e.ID().IsZero()},
-			sql.NullString{String: e.Type().String(), Valid: !e.Type().IsZero()},
-			sql.NullTime{Time: e.OccurredAt(), Valid: !e.OccurredAt().IsZero()},
-			"now()",
-			sql.NullString{String: e.AggregateID().String(), Valid: !e.AggregateID().IsZero()},
-			sql.NullString{String: e.AggregateType().String(), Valid: !e.AggregateType().IsZero()},
-			sql.NullInt64{Int64: e.AggregateVersion().Int64(), Valid: !e.AggregateVersion().IsZero()},
-			e.Data(),
-			e.Metadata(),
+			sqlEvent.ID,
+			sqlEvent.Type,
+			sqlEvent.OccurredAt,
+			sqlEvent.RegisteredAt,
+			sqlEvent.AggregateID,
+			sqlEvent.AggregateType,
+			sqlEvent.AggregateVersion,
+			sqlEvent.Data,
+			sqlEvent.Metadata,
 		)
 	}
 
@@ -232,7 +237,7 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, table string, a even
 }
 
 func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, fromVersion eventsource.AggregateVersion) ([]eventsource.EventReadModel, error) {
-	ctx, span := s.tracer.Start(ctx, "eventStore.loadEvents")
+	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.loadEvents")
 	defer span.End()
 
 	tx := t.(*sqlx.Tx)
@@ -292,7 +297,7 @@ func (s *eventStore) computeTableName(tableName string) string {
 }
 
 func (s *eventStore) saveSnapshots(ctx context.Context, tx eventsource.Transaction, ss ...*eventsource.Snapshot) error {
-	ctx, span := s.tracer.Start(ctx, "eventStore.saveSnapshots")
+	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.saveSnapshots")
 	defer span.End()
 
 	t := tx.(*sqlx.Tx)
@@ -309,13 +314,14 @@ func (s *eventStore) saveSnapshots(ctx context.Context, tx eventsource.Transacti
 		)
 
 	for _, snap := range ss {
+		sqlSnap := FromSnapshot(*snap)
 		insertBuilder = insertBuilder.Values(
-			snap.AggregateID.String(),
-			snap.AggregateType.String(),
-			snap.AggregateVersion.Int64(),
-			snap.TakenAt.UTC(),
+			sqlSnap.AggregateID,
+			sqlSnap.AggregateType,
+			sqlSnap.AggregateVersion,
+			sqlSnap.TakenAt,
 			time.Now().UTC(),
-			string(snap.Data),
+			sqlSnap.Data,
 		)
 	}
 
@@ -339,7 +345,7 @@ func (s *eventStore) saveSnapshots(ctx context.Context, tx eventsource.Transacti
 }
 
 func (s *eventStore) loadLatestSnapshot(ctx context.Context, tx *sqlx.Tx, id eventsource.AggregateID) (*eventsource.Snapshot, error) {
-	ctx, span := s.tracer.Start(ctx, "eventStore.loadLatestSnapshot")
+	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.loadLatestSnapshot")
 	defer span.End()
 
 	b := strings.Builder{}
@@ -376,7 +382,7 @@ func (s *eventStore) loadLatestSnapshot(ctx context.Context, tx *sqlx.Tx, id eve
 }
 
 func (s *eventStore) saveToOutbox(ctx context.Context, tx *sqlx.Tx, ee []eventsource.Event) error {
-	ctx, span := s.tracer.Start(ctx, "eventStore.saveToOutbox")
+	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.saveToOutbox")
 	defer span.End()
 
 	insertBuilder := squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar).

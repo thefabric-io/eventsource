@@ -1,21 +1,15 @@
 package eventsource
 
 import (
-	"encoding/json"
 	"time"
 )
-
-type Snapshoter interface {
-	Snapshot() (*Snapshot, error)
-	ForceSnapshot() *Snapshot
-}
 
 type Snapshot struct {
 	AggregateID      AggregateID
 	AggregateType    AggregateType
 	AggregateVersion AggregateVersion
 	TakenAt          time.Time
-	Data             json.RawMessage
+	Data             []byte
 }
 
 func (s Snapshot) NextVersion() AggregateVersion {

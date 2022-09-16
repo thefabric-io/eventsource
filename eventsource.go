@@ -2,16 +2,18 @@ package eventsource
 
 import "log"
 
-func Raise(aggregate Aggregator, change Event) {
-	if aggregate == nil || change == nil {
+func Raise(aggregate Aggregator, changes ...Event) {
+	if aggregate == nil || len(changes) == 0 {
 		return
 	}
 
-	aggregate.StackChange(change)
+	for _, e := range changes {
+		aggregate.StackChange(e)
 
-	change.SetVersion(aggregate.Version() + 1)
+		e.SetVersion(aggregate.Version() + 1)
 
-	On(aggregate, change, true)
+		On(aggregate, e, true)
+	}
 }
 
 func On(a Aggregator, event Event, new bool) {
@@ -24,7 +26,7 @@ func On(a Aggregator, event Event, new bool) {
 
 		action := "replayed"
 		if new {
-			action = "applied"
+			action = "raised"
 		}
 
 		log.Printf("%s event `%s` with id `%s` on aggregate with id `%s`", action, event.Type(), event.ID(), event.AggregateID())
@@ -33,4 +35,25 @@ func On(a Aggregator, event Event, new bool) {
 
 		a.StackSnapshot(a.ForceSnapshot())
 	}
+}
+
+func Replay(a Aggregator, snapshot *Snapshot, ee ...Event) (Aggregator, error) {
+	base, err := InitBaseAggregate(a.ID(), a)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := a.SetBaseAggregate(base); err != nil {
+		return nil, err
+	}
+
+	base.FromSnapshot(snapshot)
+
+	Sort(ee)
+
+	for _, e := range ee {
+		On(a, e, false)
+	}
+
+	return a, nil
 }

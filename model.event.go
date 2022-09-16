@@ -16,6 +16,7 @@ func Sort(ee []Event) {
 
 type Event interface {
 	fmt.Stringer
+	DataSerializer
 	ApplyTo(aggregate Aggregator)       // ApplyTo applies the event to the aggregate
 	ID() EventID                        // ID returns the id of the event.
 	Type() EventType                    // Type returns the type of the event.
@@ -24,8 +25,7 @@ type Event interface {
 	AggregateType() AggregateType       // AggregateType is the type of the aggregate that the event can be applied to.
 	AggregateVersion() AggregateVersion // AggregateVersion is the version of the aggregate after the event has been applied.
 	SetVersion(AggregateVersion)        // SetVersion sets the aggregate version of the event
-	Data() json.RawMessage              // Data returns the raw json format of the event
-	Metadata() json.RawMessage          // Metadata is app-specific metadata such as request AggregateID, originating user etc.
+	Metadata() Metadata                 // Metadata is app-specific metadata such as request AggregateID, originating user etc.
 }
 
 func NewMetadata() Metadata {
@@ -40,6 +40,14 @@ func (m Metadata) Add(key string, value interface{}) Metadata {
 	return m
 }
 
+func (m Metadata) Serialize() ([]byte, error) {
+	return json.Marshal(&m)
+}
+
+func (m *Metadata) Deserialize(b []byte) error {
+	return json.Unmarshal(b, m)
+}
+
 type EventType string
 
 func (t EventType) String() string {
@@ -51,7 +59,7 @@ func (t EventType) IsZero() bool {
 }
 
 func NewBaseEvent(from Aggregator, metadata Metadata) *BaseEvent {
-	return initBaseEvent(EventID(NewEventID()), time.Now(), from.ID(), from.Type(), from.Version(), metadata)
+	return initBaseEvent(NewEventID(), time.Now(), from.ID(), from.Type(), from.Version(), metadata)
 }
 
 func initBaseEvent(id EventID, occurredAt time.Time, aggregateID AggregateID, aggregateType AggregateType, version AggregateVersion, metadata Metadata) *BaseEvent {
@@ -78,36 +86,31 @@ type BaseEvent struct {
 	metadata         map[string]interface{}
 }
 
-func (e BaseEvent) ID() EventID {
+func (e *BaseEvent) ID() EventID {
 	return e.id
 }
 
-func (e BaseEvent) OccurredAt() time.Time {
+func (e *BaseEvent) OccurredAt() time.Time {
 	return e.occurredAt
 }
 
-func (e BaseEvent) AggregateID() AggregateID {
+func (e *BaseEvent) AggregateID() AggregateID {
 	return e.aggregateID
 }
 
-func (e BaseEvent) AggregateType() AggregateType {
+func (e *BaseEvent) AggregateType() AggregateType {
 	return e.aggregateType
 }
 
-func (e BaseEvent) AggregateVersion() AggregateVersion {
+func (e *BaseEvent) AggregateVersion() AggregateVersion {
 	return e.aggregateVersion
 }
 
-func (e BaseEvent) Metadata() json.RawMessage {
-	b, err := json.Marshal(e.metadata)
-	if err != nil {
-		return json.RawMessage{}
-	}
-
-	return b
+func (e *BaseEvent) Metadata() Metadata {
+	return e.metadata
 }
 
-func (e BaseEvent) String() string {
+func (e *BaseEvent) String() string {
 	return fmt.Sprintf("event '%s' occurred on aggregate '%s' (v%d => v%d) with id '%s'", e.ID(), e.AggregateType(), e.aggregateVersion-1, e.aggregateVersion, e.AggregateID())
 }
 
