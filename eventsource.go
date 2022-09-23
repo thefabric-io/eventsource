@@ -66,7 +66,7 @@ func On(ctx context.Context, a Aggregate, event Event, new bool) {
 	}
 }
 
-func Replay(ctx context.Context, id AggregateID, a Aggregate, snapshot *Snapshot, ee ...Event) (Aggregate, error) {
+func Replay(ctx context.Context, a Aggregate, snapshot *Snapshot, ee ...Event) (Aggregate, error) {
 	FromSnapshot(snapshot, a)
 
 	Sort(ee)

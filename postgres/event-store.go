@@ -138,7 +138,7 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 
 	events, aggregate := parser.ParseEvents(ctx, id, ee...)
 
-	return eventsource.Replay(ctx, id, aggregate, latestSnapshot, events...)
+	return eventsource.Replay(ctx, aggregate, latestSnapshot, events...)
 }
 
 func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, events []eventsource.Event) ([]Event, error) {
