@@ -10,6 +10,10 @@ func (v AggregateVersion) Int64() int64 {
 	return int64(v)
 }
 
+func (v AggregateVersion) Int() int {
+	return int(v)
+}
+
 func (v AggregateVersion) IsZero() bool {
 	return v == 0
 }

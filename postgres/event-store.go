@@ -39,7 +39,7 @@ type eventStore struct {
 	tracer  trace.Tracer
 }
 
-func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a eventsource.Aggregator, opts ...eventsource.SaveOption) error {
+func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a eventsource.Aggregate, opts ...eventsource.SaveOption) error {
 	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.Save")
 	defer span.End()
 
@@ -51,7 +51,7 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 
 	options := eventsource.NewSaveOptions(opts...)
 
-	_, err := s.save(ctx, tx, a)
+	_, err := s.save(ctx, tx, a.Changes())
 	if err != nil {
 		span.RecordError(err)
 
@@ -80,7 +80,7 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 	return nil
 }
 
-func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser, replayer eventsource.Replayer) (eventsource.Aggregator, error) {
+func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser) (eventsource.Aggregate, error) {
 	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.Load")
 	defer span.End()
 
@@ -136,20 +136,15 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 		return nil, err
 	}
 
-	var events = make([]eventsource.Event, 0)
-	for _, e := range ee {
-		ev := parser.ParseEvent(e)
-		events = append(events, ev)
-	}
+	events, aggregate := parser.ParseEvents(ctx, id, ee...)
 
-	return replayer.Replay(id, latestSnapshot, events...)
+	return eventsource.Replay(ctx, id, aggregate, latestSnapshot, events...)
 }
 
-func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, a eventsource.Aggregator) ([]Event, error) {
+func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, events []eventsource.Event) ([]Event, error) {
 	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.save")
 	defer span.End()
 
-	events := a.Changes()
 	if len(events) == 0 {
 		return nil, eventsource.ErrNoEventsToStore
 	}

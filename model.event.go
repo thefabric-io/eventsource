@@ -1,6 +1,7 @@
 package eventsource
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -16,16 +17,15 @@ func Sort(ee []Event) {
 
 type Event interface {
 	fmt.Stringer
-	DataSerializer
-	ApplyTo(aggregate Aggregator)       // ApplyTo applies the event to the aggregate
-	ID() EventID                        // ID returns the id of the event.
-	Type() EventType                    // Type returns the type of the event.
-	OccurredAt() time.Time              // OccurredAt of when the event was created.
-	AggregateID() AggregateID           // AggregateID is the id of the aggregate that the event belongs to.
-	AggregateType() AggregateType       // AggregateType is the type of the aggregate that the event can be applied to.
-	AggregateVersion() AggregateVersion // AggregateVersion is the version of the aggregate after the event has been applied.
-	SetVersion(AggregateVersion)        // SetVersion sets the aggregate version of the event
-	Metadata() Metadata                 // Metadata is app-specific metadata such as request AggregateID, originating user etc.
+	ApplyTo(ctx context.Context, aggregate Aggregate) // ApplyTo applies the event to the aggregate
+	ID() EventID                                      // ID returns the id of the event.
+	Type() EventType                                  // Type returns the type of the event.
+	OccurredAt() time.Time                            // OccurredAt of when the event was created.
+	AggregateID() AggregateID                         // AggregateID is the id of the aggregate that the event belongs to.
+	AggregateType() AggregateType                     // AggregateType is the type of the aggregate that the event can be applied to.
+	AggregateVersion() AggregateVersion               // AggregateVersion is the version of the aggregate after the event has been applied.
+	SetVersion(AggregateVersion)                      // SetVersion sets the aggregate version of the event
+	Metadata() Metadata                               // Metadata is app-specific metadata such as request AggregateID, originating user etc.
 }
 
 func NewMetadata() Metadata {
@@ -40,14 +40,6 @@ func (m Metadata) Add(key string, value interface{}) Metadata {
 	return m
 }
 
-func (m Metadata) Serialize() ([]byte, error) {
-	return json.Marshal(&m)
-}
-
-func (m *Metadata) Deserialize(b []byte) error {
-	return json.Unmarshal(b, m)
-}
-
 type EventType string
 
 func (t EventType) String() string {
@@ -58,7 +50,7 @@ func (t EventType) IsZero() bool {
 	return len(strings.TrimSpace(t.String())) == 0
 }
 
-func NewBaseEvent(from Aggregator, metadata Metadata) *BaseEvent {
+func NewBaseEvent(from Aggregate, metadata Metadata) *BaseEvent {
 	return initBaseEvent(NewEventID(), time.Now(), from.ID(), from.Type(), from.Version(), metadata)
 }
 

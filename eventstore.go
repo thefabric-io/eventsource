@@ -59,8 +59,8 @@ type SaveOptions struct {
 }
 
 type EventStore interface {
-	Save(ctx context.Context, tx Transaction, a Aggregator, opts ...SaveOption) error
-	Load(ctx context.Context, tx Transaction, id AggregateID, parser EventParser, replayer Replayer) (Aggregator, error)
+	Save(ctx context.Context, tx Transaction, a Aggregate, opts ...SaveOption) error
+	Load(ctx context.Context, tx Transaction, id AggregateID, parser EventParser) (Aggregate, error)
 }
 
 type Transaction interface {

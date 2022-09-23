@@ -1,5 +1,7 @@
 package eventsource
 
+import "context"
+
 type EventParser interface {
-	ParseEvent(model EventReadModel) Event
+	ParseEvents(ctx context.Context, id AggregateID, model ...EventReadModel) ([]Event, Aggregate)
 }

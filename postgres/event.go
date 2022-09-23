@@ -21,12 +21,12 @@ type Event struct {
 }
 
 func FromEvent(event eventsource.Event) (*Event, error) {
-	data, err := event.Serialize()
+	data, err := eventsource.MarshalES(event)
 	if err != nil {
 		return nil, err
 	}
 
-	metadata, err := event.Metadata().Serialize()
+	metadata, err := eventsource.MarshalES(event.Metadata())
 	if err != nil {
 		return nil, err
 	}
