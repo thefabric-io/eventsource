@@ -3,6 +3,7 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -51,8 +52,7 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 
 	options := eventsource.NewSaveOptions(opts...)
 
-	_, err := s.save(ctx, tx, a.Changes())
-	if err != nil {
+	if err := s.save(ctx, tx, a.Changes()); err != nil {
 		span.RecordError(err)
 
 		return err
@@ -80,9 +80,15 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 	return nil
 }
 
-func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, parser eventsource.EventParser) (eventsource.Aggregate, error) {
+func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, aggregate eventsource.Aggregate) (eventsource.Aggregate, error) {
 	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.Load")
 	defer span.End()
+
+	if aggregate.ID().IsZero() || aggregate.Type().IsZero() {
+		return nil, errors.New("aggragate id and type must be specified")
+	}
+
+	aggregate.PrepareForLoading()
 
 	if t == nil {
 		err := eventsource.ErrTransactionIsRequired
@@ -93,18 +99,9 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 		return nil, err
 	}
 
-	if parser == nil {
-		err := eventsource.ErrEventParserIsRequired
-
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-
-		return nil, err
-	}
-
 	tx := t.(*sqlx.Tx)
 
-	latestSnapshot, err := s.loadLatestSnapshot(ctx, tx, id)
+	latestSnapshot, err := s.loadLatestSnapshot(ctx, tx, aggregate.ID())
 	if err != nil && !eventsource.ErrIsSnapshotNotFound(err) {
 		span.RecordError(err)
 
@@ -120,7 +117,7 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 		snapshotExist = true
 	}
 
-	ee, err := s.loadEvents(ctx, tx, id, fromVersion)
+	ee, err := s.loadEvents(ctx, tx, aggregate.ID(), fromVersion)
 	if err != nil {
 		span.RecordError(err)
 
@@ -136,17 +133,17 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, id eve
 		return nil, err
 	}
 
-	events, aggregate := parser.ParseEvents(ctx, id, ee...)
+	events := aggregate.ParseEvents(ctx, ee...)
 
 	return eventsource.Replay(ctx, aggregate, latestSnapshot, events...)
 }
 
-func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, events []eventsource.Event) ([]Event, error) {
+func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, events []eventsource.Event) error {
 	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.save")
 	defer span.End()
 
 	if len(events) == 0 {
-		return nil, eventsource.ErrNoEventsToStore
+		return eventsource.ErrNoEventsToStore
 	}
 
 	insertBuilder := squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar).
@@ -161,13 +158,12 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, events []eventsource
 			"aggregate_version",
 			"data",
 			"metadata",
-		).
-		Suffix("returning id, type, occurred_at, registered_at, aggregate_id, aggregate_type, aggregate_version, data, metadata")
+		)
 
 	for _, e := range events {
 		sqlEvent, err := FromEvent(e)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		insertBuilder = insertBuilder.Values(
@@ -188,47 +184,17 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, events []eventsource
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 
-		return nil, err
+		return err
 	}
 
-	rows, err := tx.QueryxContext(ctx, query, args...)
-	if err != nil {
+	if _, err = tx.ExecContext(ctx, query, args...); err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
 
-		return nil, err
-	}
-	defer rows.Close()
-
-	var eventsDB []Event
-
-	for rows.Next() {
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-		var e Event
-
-		if err := rows.Scan(
-			&e.ID,
-			&e.Type,
-			&e.OccurredAt,
-			&e.RegisteredAt,
-			&e.AggregateID,
-			&e.AggregateType,
-			&e.AggregateVersion,
-			&e.Data,
-			&e.Metadata,
-		); err != nil {
-			span.RecordError(err)
-			span.SetStatus(codes.Error, err.Error())
-
-			return nil, err
-		}
-
-		eventsDB = append(eventsDB, e)
+		return err
 	}
 
-	return eventsDB, nil
+	return nil
 }
 
 func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, fromVersion eventsource.AggregateVersion) ([]eventsource.EventReadModel, error) {

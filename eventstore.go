@@ -7,7 +7,6 @@ import (
 
 var (
 	ErrNoEventsToStore       = errors.New("no events to store")
-	ErrEventParserIsRequired = errors.New("event parser is required")
 	ErrNoSnapshotFound       = errors.New("no snapshot found")
 	ErrTransactionIsRequired = errors.New("transaction is required")
 	ErrAggregateDoNotExist   = errors.New("aggregate do not exist")
@@ -60,7 +59,7 @@ type SaveOptions struct {
 
 type EventStore interface {
 	Save(ctx context.Context, tx Transaction, a Aggregate, opts ...SaveOption) error
-	Load(ctx context.Context, tx Transaction, id AggregateID, parser EventParser) (Aggregate, error)
+	Load(ctx context.Context, tx Transaction, a Aggregate) (Aggregate, error)
 }
 
 type Transaction interface {

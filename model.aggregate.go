@@ -1,5 +1,7 @@
 package eventsource
 
+import "context"
+
 type Aggregate interface {
 	ID() AggregateID
 	Type() AggregateType
@@ -11,6 +13,8 @@ type Aggregate interface {
 	SnapshotsWithFrequency(frequency int) []*Snapshot
 	SetVersion(version AggregateVersion)
 	IncrementVersion()
+	PrepareForLoading()
+	ParseEvents(context.Context, ...EventReadModel) []Event
 }
 
 type BaseAggregate struct {
@@ -21,14 +25,20 @@ type BaseAggregate struct {
 	snapshots []*Snapshot
 }
 
-func InitAggregate(id AggregateID, t AggregateType) *BaseAggregate {
+func InitAggregate(id string, t AggregateType) *BaseAggregate {
 	return &BaseAggregate{
-		id:        id,
+		id:        AggregateID(id),
 		t:         t,
 		v:         0,
 		changes:   make([]Event, 0),
 		snapshots: make([]*Snapshot, 0),
 	}
+}
+
+func (a *BaseAggregate) PrepareForLoading() {
+	a.v = 0
+	a.changes = make([]Event, 0)
+	a.snapshots = make([]*Snapshot, 0)
 }
 
 func (a *BaseAggregate) Type() AggregateType {
