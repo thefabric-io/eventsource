@@ -25,7 +25,6 @@ create schema if not exists es;
 create schema if not exists projection;
 
 drop table if exists es.snapshots;
-drop table if exists es.outbox;
 drop table if exists es.events;
 drop table if exists projection.organizations;
 
@@ -41,15 +40,6 @@ create table if not exists es.events
     data              jsonb,
     metadata          jsonb,
     unique (aggregate_id, aggregate_version)
-);
-
-create table if not exists es.outbox
-(
-    event_id        varchar primary key,
-    registered_at   timestamptz,
-    acknowledged    boolean,
-    acknowledged_at boolean,
-    foreign key (event_id) references es.events (id)
 );
 
 create table if not exists es.snapshots

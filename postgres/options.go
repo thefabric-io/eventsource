@@ -9,7 +9,6 @@ func DefaultOptions() *Options {
 	return &Options{
 		schemaName:            defaultSchemaName(),
 		eventStorageParams:    defaultEventStorageParams(),
-		outboxStorageParams:   defaultOutboxStorageParams(),
 		snapshotStorageParams: defaultSnapshotStorageParams(),
 	}
 }
@@ -17,14 +16,12 @@ func DefaultOptions() *Options {
 type Options struct {
 	schemaName            string
 	eventStorageParams    eventStorageParams
-	outboxStorageParams   outboxStorageParams
 	snapshotStorageParams snapshotStorageParams
 }
 
 func (o *Options) Validate() error {
 	if len(strings.TrimSpace(o.schemaName)) == 0 ||
 		len(strings.TrimSpace(o.eventStorageParams.tableName)) == 0 ||
-		len(strings.TrimSpace(o.outboxStorageParams.tableName)) == 0 ||
 		len(strings.TrimSpace(o.snapshotStorageParams.tableName)) == 0 {
 		return fmt.Errorf("options invalid")
 	}
@@ -56,12 +53,6 @@ func (b *OptionsBuilder) WithEventStorageTableName(name string) *OptionsBuilder 
 	return b
 }
 
-func (b *OptionsBuilder) WithOutboxStorageTableName(name string) *OptionsBuilder {
-	b.options.outboxStorageParams.tableName = name
-
-	return b
-}
-
 func (b *OptionsBuilder) WithSnapshotStorageTableName(name string) *OptionsBuilder {
 	b.options.snapshotStorageParams.tableName = name
 
@@ -81,16 +72,6 @@ func defaultEventStorageParams() eventStorageParams {
 }
 
 type eventStorageParams struct {
-	tableName string
-}
-
-func defaultOutboxStorageParams() outboxStorageParams {
-	return outboxStorageParams{
-		tableName: "outbox",
-	}
-}
-
-type outboxStorageParams struct {
 	tableName string
 }
 

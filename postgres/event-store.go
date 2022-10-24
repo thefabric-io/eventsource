@@ -58,14 +58,6 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 		return err
 	}
 
-	if options.MustSendToOutbox {
-		if err := s.saveToOutbox(ctx, tx, a.Changes()); err != nil {
-			span.RecordError(err)
-
-			return err
-		}
-	}
-
 	if options.WithSnapshot {
 		snapshots := a.SnapshotsWithFrequency(options.WithSnapshotFrequency)
 		if len(snapshots) > 0 {
@@ -342,49 +334,10 @@ func (s *eventStore) loadLatestSnapshot(ctx context.Context, tx *sqlx.Tx, id eve
 	return snapshot.ToSnapshot(), nil
 }
 
-func (s *eventStore) saveToOutbox(ctx context.Context, tx *sqlx.Tx, ee []eventsource.Event) error {
-	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.saveToOutbox")
-	defer span.End()
-
-	insertBuilder := squirrel.StatementBuilder.PlaceholderFormat(squirrel.Dollar).
-		Insert(s.outboxTableName()).
-		Columns(
-			"event_id",
-			"registered_at",
-			"acknowledged",
-		)
-
-	for _, e := range ee {
-		insertBuilder = insertBuilder.Values(e.ID(), "now()", false)
-	}
-
-	query, args, err := insertBuilder.ToSql()
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-
-		return err
-	}
-
-	_, err = tx.ExecContext(ctx, query, args...)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
-
-		return err
-	}
-
-	return nil
-}
-
 func (s *eventStore) eventsTableName() string {
 	return s.computeTableName(s.options.eventStorageParams.tableName)
 }
 
 func (s *eventStore) snapshotsTableName() string {
 	return s.computeTableName(s.options.snapshotStorageParams.tableName)
-}
-
-func (s *eventStore) outboxTableName() string {
-	return s.computeTableName(s.options.outboxStorageParams.tableName)
 }

@@ -25,23 +25,15 @@ func WithSnapshot(frequency int) SaveOption {
 	}
 }
 
-func SendToOutbox(b bool) SaveOption {
-	return func(opt *SaveOptions) {
-		opt.MustSendToOutbox = b
-	}
-}
-
 func NewSaveOptions(opts ...SaveOption) *SaveOptions {
 	const (
 		defaultWithSnapshot          = true
 		defaultWithSnapshotFrequency = 10
-		defaultMustSendToOutbox      = true
 	)
 
 	result := &SaveOptions{
 		WithSnapshot:          defaultWithSnapshot,
 		WithSnapshotFrequency: defaultWithSnapshotFrequency,
-		MustSendToOutbox:      defaultMustSendToOutbox,
 	}
 
 	for _, opt := range opts {
@@ -54,7 +46,6 @@ func NewSaveOptions(opts ...SaveOption) *SaveOptions {
 type SaveOptions struct {
 	WithSnapshot          bool
 	WithSnapshotFrequency int
-	MustSendToOutbox      bool
 }
 
 type EventStore interface {
