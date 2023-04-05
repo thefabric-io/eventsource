@@ -188,6 +188,13 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, events []eventsource
 	return nil
 }
 
+func (s *eventStore) LoadEvents(ctx context.Context, t eventsource.Transaction, aggregateID, aggregateType string, fromVersion int) ([]eventsource.EventReadModel, error) {
+	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.LoadEvents")
+	defer span.End()
+
+	return s.loadEvents(ctx, t, eventsource.AggregateID(aggregateID), eventsource.AggregateType(aggregateType), eventsource.AggregateVersion(fromVersion))
+}
+
 func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, aggregateType eventsource.AggregateType, fromVersion eventsource.AggregateVersion) ([]eventsource.EventReadModel, error) {
 	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.loadEvents")
 	defer span.End()
