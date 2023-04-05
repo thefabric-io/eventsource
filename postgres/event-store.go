@@ -102,14 +102,13 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, aggreg
 
 	snapshotExist := false
 	fromVersion := eventsource.AggregateVersion(1)
-	if eventsource.ErrIsSnapshotNotFound(err) {
-		span.RecordError(err)
-	} else {
+
+	if !eventsource.ErrIsSnapshotNotFound(err) {
 		fromVersion = latestSnapshot.AggregateVersion.Next()
 		snapshotExist = true
 	}
 
-	ee, err := s.loadEvents(ctx, tx, aggregate.ID(), fromVersion)
+	ee, err := s.loadEvents(ctx, tx, aggregate.ID(), aggregate.Type(), fromVersion)
 	if err != nil {
 		span.RecordError(err)
 
@@ -189,7 +188,7 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, events []eventsource
 	return nil
 }
 
-func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, fromVersion eventsource.AggregateVersion) ([]eventsource.EventReadModel, error) {
+func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, aggregateType eventsource.AggregateType, fromVersion eventsource.AggregateVersion) ([]eventsource.EventReadModel, error) {
 	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.loadEvents")
 	defer span.End()
 
@@ -201,11 +200,12 @@ func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, 
 	b.WriteString(fmt.Sprintf("from %s ", s.eventsTableName()))
 	b.WriteString("where aggregate_id = $1 ")
 	b.WriteString("and aggregate_version >= $2 ")
+	b.WriteString("and aggregate_type = $3 ")
 	b.WriteString("order by aggregate_version; ")
 
 	query := b.String()
 
-	rows, err := tx.QueryContext(ctx, query, id.String(), fromVersion)
+	rows, err := tx.QueryContext(ctx, query, id.String(), fromVersion, aggregateType)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
