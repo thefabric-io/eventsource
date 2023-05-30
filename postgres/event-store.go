@@ -72,6 +72,21 @@ func (s *eventStore) Save(ctx context.Context, t eventsource.Transaction, a even
 	return nil
 }
 
+func (s *eventStore) EventsHistory(ctx context.Context, tx eventsource.Transaction, aggregateID, aggregateType string, fromVersion int, limit int) ([]eventsource.EventReadModel, error) {
+	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.EventsHistory")
+	defer span.End()
+
+	ee, err := s.loadEvents(ctx, tx, eventsource.AggregateID(aggregateID), eventsource.AggregateType(aggregateType), eventsource.AggregateVersion(fromVersion), limit)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+
+		return nil, err
+	}
+
+	return ee, nil
+}
+
 func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, aggregate eventsource.Aggregate) (eventsource.Aggregate, error) {
 	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.Load")
 	defer span.End()
@@ -108,7 +123,7 @@ func (s *eventStore) Load(ctx context.Context, t eventsource.Transaction, aggreg
 		snapshotExist = true
 	}
 
-	ee, err := s.loadEvents(ctx, tx, aggregate.ID(), aggregate.Type(), fromVersion)
+	ee, err := s.loadEvents(ctx, tx, aggregate.ID(), aggregate.Type(), fromVersion, 0)
 	if err != nil {
 		span.RecordError(err)
 
@@ -188,14 +203,7 @@ func (s *eventStore) save(ctx context.Context, tx *sqlx.Tx, events []eventsource
 	return nil
 }
 
-func (s *eventStore) LoadEvents(ctx context.Context, t eventsource.Transaction, aggregateID, aggregateType string, fromVersion int) ([]eventsource.EventReadModel, error) {
-	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.LoadEvents")
-	defer span.End()
-
-	return s.loadEvents(ctx, t, eventsource.AggregateID(aggregateID), eventsource.AggregateType(aggregateType), eventsource.AggregateVersion(fromVersion))
-}
-
-func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, aggregateType eventsource.AggregateType, fromVersion eventsource.AggregateVersion) ([]eventsource.EventReadModel, error) {
+func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, id eventsource.AggregateID, aggregateType eventsource.AggregateType, fromVersion eventsource.AggregateVersion, limit int) ([]eventsource.EventReadModel, error) {
 	ctx, span := s.tracer.Start(ctx, "eventsource.postgres.eventStore.loadEvents")
 	defer span.End()
 
@@ -208,11 +216,22 @@ func (s *eventStore) loadEvents(ctx context.Context, t eventsource.Transaction, 
 	b.WriteString("where aggregate_id = $1 ")
 	b.WriteString("and aggregate_version >= $2 ")
 	b.WriteString("and aggregate_type = $3 ")
-	b.WriteString("order by aggregate_version; ")
+	b.WriteString("order by aggregate_version ")
+
+	args := []any{
+		id.String(),
+		fromVersion,
+		aggregateType,
+	}
+
+	if limit != 0 {
+		b.WriteString("limit $4; ")
+		args = append(args, limit)
+	}
 
 	query := b.String()
 
-	rows, err := tx.QueryContext(ctx, query, id.String(), fromVersion, aggregateType)
+	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())

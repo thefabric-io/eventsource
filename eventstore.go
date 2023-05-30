@@ -51,6 +51,7 @@ type SaveOptions struct {
 type EventStore interface {
 	Save(ctx context.Context, tx Transaction, a Aggregate, opts ...SaveOption) error
 	Load(ctx context.Context, tx Transaction, a Aggregate) (Aggregate, error)
+	EventsHistory(ctx context.Context, tx Transaction, aggregateID, aggregateType string, fromVersion int, limit int) ([]EventReadModel, error)
 }
 
 type Transaction interface {
