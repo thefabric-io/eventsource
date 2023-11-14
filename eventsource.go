@@ -94,7 +94,7 @@ func MarshalES(object any) ([]byte, error) {
 }
 
 func UnmarshalES(b []byte, object any) error {
-	if s, implements := object.(Marshaler); implements {
+	if s, implements := object.(Unmarshaler); implements {
 		return s.UnmarshalES(b, object)
 	}
 
